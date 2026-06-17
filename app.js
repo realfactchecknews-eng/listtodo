@@ -50,6 +50,15 @@ syncToggle.addEventListener('click', () => {
   syncCard.classList.toggle('is-open');
 });
 
+// Pause polling when tab is hidden to avoid unnecessary work.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopPolling();
+  } else if (dbUrl) {
+    startPolling();
+  }
+});
+
 connectDbBtn.addEventListener('click', connectDatabase);
 dbUrlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') connectDatabase();
@@ -184,20 +193,31 @@ async function fetchTasksFromCloud() {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const data = await res.json();
-  isSyncingFromCloud = true;
 
+  let newTasks = [];
   if (data === null || data === undefined) {
-    tasks = [];
+    newTasks = [];
   } else if (Array.isArray(data)) {
-    tasks = data;
+    newTasks = data;
   } else {
-    tasks = Object.values(data);
+    newTasks = Object.values(data);
   }
 
+  const currentJson = JSON.stringify(tasks);
+  const newJson = JSON.stringify(newTasks);
+
+  // No changes from the cloud — skip re-render to avoid flicker.
+  if (currentJson === newJson) {
+    lastSavedTasksJson = newJson;
+    return;
+  }
+
+  isSyncingFromCloud = true;
+  tasks = newTasks;
   saveTasks();
   render();
   isSyncingFromCloud = false;
-  lastSavedTasksJson = JSON.stringify(tasks);
+  lastSavedTasksJson = newJson;
 }
 
 async function saveTasksToCloud() {

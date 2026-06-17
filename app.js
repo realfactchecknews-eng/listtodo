@@ -7,14 +7,28 @@ const totalCount = document.getElementById('totalCount');
 const activeCount = document.getElementById('activeCount');
 const doneCount = document.getElementById('doneCount');
 const filterBtns = document.querySelectorAll('.filter');
+const dbUrlInput = document.getElementById('dbUrl');
+const connectDbBtn = document.getElementById('connectDbBtn');
+const syncCard = document.getElementById('syncCard');
+const syncToggle = document.getElementById('syncToggle');
+const syncStatus = document.getElementById('syncStatus');
+
+// Constants
+const STORAGE_KEY = 'project-ideas-tasks';
+const DB_URL_KEY = 'project-ideas-db-url';
+const SYNC_INTERVAL = 5000; // 5 seconds
 
 // State
-const STORAGE_KEY = 'project-ideas-tasks';
-let tasks = loadTasks();
+let tasks = [];
 let currentFilter = 'all';
+let dbUrl = loadDbUrl();
+let isSyncingFromCloud = false;
+let lastSavedTasksJson = '';
+let syncIntervalId = null;
+let cloudSaveTimeout = null;
 
 // Init
-render();
+init();
 
 // Events
 addBtn.addEventListener('click', addTask);
@@ -31,7 +45,39 @@ filterBtns.forEach((btn) => {
   });
 });
 
+syncToggle.addEventListener('click', () => {
+  syncCard.classList.toggle('is-open');
+});
+
+connectDbBtn.addEventListener('click', connectDatabase);
+dbUrlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') connectDatabase();
+});
+
+// Sync UI init
+dbUrlInput.value = dbUrl || '';
+updateSyncStatus();
+if (dbUrl) {
+  syncCard.classList.add('is-open');
+}
+
 // Functions
+async function init() {
+  tasks = loadTasks();
+  render();
+
+  if (dbUrl) {
+    try {
+      await fetchTasksFromCloud();
+      startPolling();
+      updateSyncStatus('online');
+    } catch (e) {
+      console.error('Failed to sync on init', e);
+      updateSyncStatus('offline');
+    }
+  }
+}
+
 function loadTasks() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -48,7 +94,164 @@ function saveTasks() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
   } catch (e) {
-    console.error('Failed to save tasks', e);
+    console.error('Failed to save tasks locally', e);
+  }
+}
+
+function loadDbUrl() {
+  try {
+    return localStorage.getItem(DB_URL_KEY) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function saveDbUrl(url) {
+  try {
+    if (url) {
+      localStorage.setItem(DB_URL_KEY, url);
+    } else {
+      localStorage.removeItem(DB_URL_KEY);
+    }
+  } catch (e) {
+    console.error('Failed to save DB URL', e);
+  }
+}
+
+function normalizeDbUrl(url) {
+  url = url.trim();
+  if (url.endsWith('/')) url = url.slice(0, -1);
+  if (url.endsWith('/tasks')) url = url.slice(0, -6);
+  if (url.endsWith('/tasks.json')) url = url.slice(0, -11);
+  return url;
+}
+
+function isCloudEnabled() {
+  return !!dbUrl;
+}
+
+function updateSyncStatus(status) {
+  if (!dbUrl) {
+    syncStatus.textContent = 'Только на этом устройстве';
+    syncStatus.classList.remove('is-online');
+    return;
+  }
+
+  if (status === 'online') {
+    syncStatus.textContent = 'Синхронизация работает';
+    syncStatus.classList.add('is-online');
+  } else if (status === 'offline') {
+    syncStatus.textContent = 'Нет связи с базой';
+    syncStatus.classList.remove('is-online');
+  } else {
+    syncStatus.textContent = 'Подключение...';
+    syncStatus.classList.remove('is-online');
+  }
+}
+
+async function connectDatabase() {
+  let url = dbUrlInput.value.trim();
+  if (!url) {
+    // Disconnect
+    dbUrl = '';
+    saveDbUrl('');
+    stopPolling();
+    updateSyncStatus();
+    syncCard.classList.remove('is-open');
+    return;
+  }
+
+  url = normalizeDbUrl(url);
+  dbUrl = url;
+  saveDbUrl(url);
+  updateSyncStatus('loading');
+
+  try {
+    await fetchTasksFromCloud();
+    startPolling();
+    updateSyncStatus('online');
+  } catch (e) {
+    console.error('Failed to connect database', e);
+    updateSyncStatus('offline');
+    alert('Не удалось подключиться. Проверь URL и правила доступа в Firebase.');
+  }
+}
+
+async function fetchTasksFromCloud() {
+  if (!dbUrl) return;
+  const res = await fetch(`${dbUrl}/tasks.json`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const data = await res.json();
+  isSyncingFromCloud = true;
+
+  if (data === null || data === undefined) {
+    tasks = [];
+  } else if (Array.isArray(data)) {
+    tasks = data;
+  } else {
+    tasks = Object.values(data);
+  }
+
+  saveTasks();
+  render();
+  isSyncingFromCloud = false;
+  lastSavedTasksJson = JSON.stringify(tasks);
+}
+
+async function saveTasksToCloud() {
+  if (!dbUrl || isSyncingFromCloud) return;
+
+  const currentJson = JSON.stringify(tasks);
+  if (currentJson === lastSavedTasksJson) return;
+
+  try {
+    const res = await fetch(`${dbUrl}/tasks.json`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: currentJson,
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    lastSavedTasksJson = currentJson;
+    updateSyncStatus('online');
+  } catch (e) {
+    console.error('Cloud save failed', e);
+    updateSyncStatus('offline');
+  }
+}
+
+function scheduleCloudSave() {
+  if (!dbUrl || isSyncingFromCloud) return;
+
+  clearTimeout(cloudSaveTimeout);
+  cloudSaveTimeout = setTimeout(() => {
+    saveTasksToCloud();
+  }, 400);
+}
+
+function startPolling() {
+  stopPolling();
+  if (!dbUrl) return;
+
+  // Sync immediately and then on interval
+  fetchTasksFromCloud().catch((e) => {
+    console.error('Polling fetch failed', e);
+    updateSyncStatus('offline');
+  });
+
+  syncIntervalId = setInterval(() => {
+    fetchTasksFromCloud().catch((e) => {
+      console.error('Polling fetch failed', e);
+      updateSyncStatus('offline');
+    });
+  }, SYNC_INTERVAL);
+}
+
+function stopPolling() {
+  if (syncIntervalId) {
+    clearInterval(syncIntervalId);
+    syncIntervalId = null;
   }
 }
 
@@ -65,6 +268,7 @@ function addTask() {
 
   tasks.unshift(task);
   saveTasks();
+  scheduleCloudSave();
   taskInput.value = '';
   taskInput.focus();
   render();
@@ -75,6 +279,7 @@ function toggleTask(id) {
   if (task) {
     task.completed = !task.completed;
     saveTasks();
+    scheduleCloudSave();
     render();
   }
 }
@@ -86,11 +291,13 @@ function deleteTask(id) {
     el.addEventListener('animationend', () => {
       tasks = tasks.filter((t) => t.id !== id);
       saveTasks();
+      scheduleCloudSave();
       render();
     }, { once: true });
   } else {
     tasks = tasks.filter((t) => t.id !== id);
     saveTasks();
+    scheduleCloudSave();
     render();
   }
 }
@@ -138,7 +345,6 @@ function render() {
       </button>
     `;
 
-    // Toggle on checkbox or task text click
     li.querySelector('.checkbox').addEventListener('click', (e) => {
       e.stopPropagation();
       toggleTask(task.id);

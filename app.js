@@ -16,6 +16,7 @@ const syncStatus = document.getElementById('syncStatus');
 // Constants
 const STORAGE_KEY = 'project-ideas-tasks';
 const DB_URL_KEY = 'project-ideas-db-url';
+const DEFAULT_DB_URL = 'https://listtodo-d8aa1-default-rtdb.europe-west1.firebasedatabase.app';
 const SYNC_INTERVAL = 5000; // 5 seconds
 
 // State
@@ -55,7 +56,7 @@ dbUrlInput.addEventListener('keydown', (e) => {
 });
 
 // Sync UI init
-dbUrlInput.value = dbUrl || '';
+dbUrlInput.value = dbUrl;
 updateSyncStatus();
 if (dbUrl) {
   syncCard.classList.add('is-open');
@@ -100,19 +101,19 @@ function saveTasks() {
 
 function loadDbUrl() {
   try {
-    return localStorage.getItem(DB_URL_KEY) || '';
+    const saved = localStorage.getItem(DB_URL_KEY);
+    // If the user never configured sync, use the default database.
+    // If they explicitly saved an empty string, sync is disabled.
+    if (saved === null) return DEFAULT_DB_URL;
+    return saved;
   } catch (e) {
-    return '';
+    return DEFAULT_DB_URL;
   }
 }
 
 function saveDbUrl(url) {
   try {
-    if (url) {
-      localStorage.setItem(DB_URL_KEY, url);
-    } else {
-      localStorage.removeItem(DB_URL_KEY);
-    }
+    localStorage.setItem(DB_URL_KEY, url);
   } catch (e) {
     console.error('Failed to save DB URL', e);
   }
